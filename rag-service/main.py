@@ -12,6 +12,8 @@ from transformers import AutoConfig, AutoTokenizer, AutoModelForSeq2SeqLM, AutoM
 from uuid import uuid4
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
+#added for the Post-Processing
+import re
 
 load_dotenv()
 
@@ -198,15 +200,24 @@ def ask_question(data: Question):
     if VECTOR_STORE is None:
         return {"answer": "Please upload at least one PDF first!"}
 
-    docs = VECTOR_STORE.similarity_search(data.question, k=10)
+    docs = VECTOR_STORE.similarity_search(data.question, k=12)#changed k=10 so more chunks can load and increase chances to get correct percentage
 
     if data.doc_ids:
         docs = [d for d in docs if d.metadata.get("doc_id") in data.doc_ids]
 
     if not docs:
         return {"answer": "No relevant context found."}
-
+        
+    #Added this for system activates special logic only when needed
+    if "percentage" in data.question.lower():
+        docs = sorted(
+            docs,
+            key=lambda d: "%" in d.page_content,
+            reverse=True
+        )
+        
     context = "\n\n".join([d.page_content for d in docs])
+
 
     if data.doc_ids and len(data.doc_ids) > 1:
         prompt = (
@@ -220,15 +231,33 @@ def ask_question(data: Question):
             "Answer:"
         )
     else:
+        # Added numeric guidance to improve accuracy for percentage-based queries
+        # This instruction biases the model toward returning '%' formatted values
+        # and avoids fractions unless explicitly requested.
+        # Upgrade the prompt for better accuracy
+        # In else block because it is for standard QA 
+        # And upper if block is for multi document we not need that and can affect whole program
         prompt = (
             "You are a helpful assistant answering questions about a PDF.\n"
             "Use ONLY the provided context.\n\n"
+            "If the question asks for a percentage:\n"
+            "- Return only the value that contains the '%' symbol.\n"
+            "- Do NOT return fractions unless explicitly asked.\n"
             f"Context:\n{context}\n\n"
             f"Question: {data.question}\n"
             "Answer:"
         )
 
     answer = generate_response(prompt, max_new_tokens=300)
+    
+    # Post-processing: If the question asks for a percentage,
+    # extract only the value containing '%'
+    # this is hard way to control for the and answer
+    if "percentage" in data.question.lower():
+        percent_match = re.findall(r"\d+%", answer)
+        if percent_match:
+            answer = percent_match[0]
+        
     return {"answer": answer}
 
 

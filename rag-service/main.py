@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 import os
 import uvicorn
 import torch
+import time
 from transformers import AutoConfig, AutoTokenizer, AutoModelForSeq2SeqLM, AutoModelForCausalLM
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -18,9 +19,10 @@ app = FastAPI()
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 
-# Temporary global variables
-vectorstore = None
-qa_chain = False
+# Session Management
+sessions = {}  # Format: { "session_id": { "vectorstore": FAISS, "last_accessed": float } }
+SESSION_TIMEOUT = 3600  # 1 hour
+
 HF_GENERATION_MODEL = os.getenv("HF_GENERATION_MODEL", "google/flan-t5-base")
 generation_tokenizer = None
 generation_model = None
@@ -78,18 +80,27 @@ def generate_response(prompt: str, max_new_tokens: int) -> str:
 
 class PDFPath(BaseModel):
     filePath: str
+    session_id: str
 
 class Question(BaseModel):
     question: str
+    session_id: str
 
 
 class SummarizeRequest(BaseModel):
     pdf: str | None = None
+    session_id: str
+
+def cleanup_expired_sessions():
+    current_time = time.time()
+    expired = [sid for sid, data in sessions.items() if current_time - data["last_accessed"] > SESSION_TIMEOUT]
+    for sid in expired:
+        del sessions[sid]
 
 @app.post("/process-pdf")
 @limiter.limit("15/15 minutes")
 def process_pdf(data: PDFPath):
-    global vectorstore, qa_chain
+    cleanup_expired_sessions()
 
     loader = PyPDFLoader(data.filePath)
     docs = loader.load()
@@ -98,9 +109,10 @@ def process_pdf(data: PDFPath):
     chunks = splitter.split_documents(docs)
     if not chunks:
             return {"error": "No text chunks generated from the PDF. Please check your file."}
-    vectorstore = FAISS.from_documents(chunks, embedding_model)
-
-    qa_chain = True  # Just a flag to indicate PDF is processed
+    sessions[data.session_id] = {
+        "vectorstore": FAISS.from_documents(chunks, embedding_model),
+        "last_accessed": time.time()
+    }
 
     return {"message": "PDF processed successfully"}
 
@@ -108,9 +120,14 @@ def process_pdf(data: PDFPath):
 @app.post("/ask")
 @limiter.limit("60/15 minutes")
 def ask_question(data: Question):
-    global vectorstore, qa_chain
-    if not qa_chain:
-        return {"answer": "Please upload a PDF first!"}
+    cleanup_expired_sessions()
+    
+    session_data = sessions.get(data.session_id)
+    if not session_data:
+        return {"answer": "Session expired or no PDF uploaded for this session!"}
+        
+    session_data["last_accessed"] = time.time()
+    vectorstore = session_data["vectorstore"]
 
     docs = vectorstore.similarity_search(data.question, k=4)
     if not docs:
@@ -132,10 +149,15 @@ def ask_question(data: Question):
 
 @app.post("/summarize")
 @limiter.limit("15/15 minutes")
-def summarize_pdf(_: SummarizeRequest):
-    global vectorstore, qa_chain
-    if not qa_chain:
-        return {"summary": "Please upload a PDF first!"}
+def summarize_pdf(data: SummarizeRequest):
+    cleanup_expired_sessions()
+
+    session_data = sessions.get(data.session_id)
+    if not session_data:
+        return {"summary": "Session expired or no PDF uploaded for this session!"}
+        
+    session_data["last_accessed"] = time.time()
+    vectorstore = session_data["vectorstore"]
 
     docs = vectorstore.similarity_search("Give a concise summary of the document.", k=6)
     if not docs:

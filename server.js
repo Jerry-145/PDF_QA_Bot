@@ -44,12 +44,18 @@ app.post("/upload", uploadLimiter, upload.single("file"), async (req, res) => {
     if (!req.file) {
       return res.status(400).json({ error: "No file uploaded. Use form field name 'file'." });
     }
+    
+    const sessionId = req.body.sessionId;
+    if (!sessionId) {
+      return res.status(400).json({ error: "Missing sessionId." });
+    }
 
     const filePath = path.join(__dirname, req.file.path);
 
     // Send PDF to Python service
     await axios.post("http://localhost:5000/process-pdf", {
       filePath: filePath,
+      session_id: sessionId,
     });
 
     res.json({ message: "PDF uploaded & processed successfully!" });
@@ -62,10 +68,15 @@ app.post("/upload", uploadLimiter, upload.single("file"), async (req, res) => {
 
 // Route: Ask Question
 app.post("/ask", askLimiter, async (req, res) => {
-  const { question } = req.body;
+  const { question, sessionId } = req.body;
+  if (!sessionId) {
+      return res.status(400).json({ error: "Missing sessionId." });
+  }
+
   try {
     const response = await axios.post("http://localhost:5000/ask", {
       question,
+      session_id: sessionId,
     });
 
     res.json({ answer: response.data.answer });
@@ -76,8 +87,16 @@ app.post("/ask", askLimiter, async (req, res) => {
 });
 
 app.post("/summarize", summarizeLimiter, async (req, res) => {
+  const { pdf, sessionId } = req.body || {};
+  if (!sessionId) {
+      return res.status(400).json({ error: "Missing sessionId." });
+  }
+
   try {
-    const response = await axios.post("http://localhost:5000/summarize", req.body || {});
+    const response = await axios.post("http://localhost:5000/summarize", {
+        pdf,
+        session_id: sessionId,
+    });
     res.json({ summary: response.data.summary });
   } catch (err) {
     const details = err.response?.data || err.message;

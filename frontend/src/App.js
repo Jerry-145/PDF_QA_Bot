@@ -1,5 +1,5 @@
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import axios from "axios";
 import ReactMarkdown from "react-markdown";
 import { Document, Page, pdfjs } from "react-pdf";
@@ -27,6 +27,11 @@ function App() {
   const [numPages, setNumPages] = useState(null);
   const [pageNumber, setPageNumber] = useState(1);
   const [summarizing, setSummarizing] = useState(false);
+  const [sessionId, setSessionId] = useState("");
+
+  useEffect(() => {
+    setSessionId(crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2, 15));
+  }, []);
 
   // Multi-PDF upload
   const uploadPDF = async () => {
@@ -34,6 +39,7 @@ function App() {
     setUploading(true);
     const formData = new FormData();
     formData.append("file", file);
+    formData.append("sessionId", sessionId);
     try {
       await axios.post(`${API_BASE}/upload`, formData);
       const url = URL.createObjectURL(file);
@@ -53,7 +59,7 @@ function App() {
     setAsking(true);
     setPdfs(prev => prev.map(pdf => pdf.name === selectedPdf ? { ...pdf, chat: [...pdf.chat, { role: "user", text: question }] } : pdf));
     try {
-      const res = await axios.post(`${API_BASE}/ask`, { question });
+      const res = await axios.post(`${API_BASE}/ask`, { question, sessionId });
       setPdfs(prev => prev.map(pdf => pdf.name === selectedPdf ? { ...pdf, chat: [...pdf.chat, { role: "bot", text: res.data.answer }] } : pdf));
     } catch (e) {
       setPdfs(prev => prev.map(pdf => pdf.name === selectedPdf ? { ...pdf, chat: [...pdf.chat, { role: "bot", text: "Error getting answer." }] } : pdf));
@@ -67,7 +73,7 @@ function App() {
     if (!selectedPdf) return;
     setSummarizing(true);
     try {
-      const res = await axios.post(`${API_BASE}/summarize`, { pdf: selectedPdf });
+      const res = await axios.post(`${API_BASE}/summarize`, { pdf: selectedPdf, sessionId });
       setPdfs(prev => prev.map(pdf => pdf.name === selectedPdf ? { ...pdf, chat: [...pdf.chat, { role: "bot", text: res.data.summary }] } : pdf));
     } catch (e) {
       setPdfs(prev => prev.map(pdf => pdf.name === selectedPdf ? { ...pdf, chat: [...pdf.chat, { role: "bot", text: "Error summarizing PDF." }] } : pdf));

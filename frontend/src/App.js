@@ -20,11 +20,12 @@ const THEME_STORAGE_KEY = 'pdf-qa-bot-theme';
 
 function App() {
   const [file, setFile] = useState(null);
-  const [pdfs, setPdfs] = useState([]); // {name, url, chat: []}
+  const [pdfs, setPdfs] = useState([]); // {name, url, chat: [], processed: false}
   const [selectedPdf, setSelectedPdf] = useState(null);
   const [question, setQuestion] = useState("");
   const [uploading, setUploading] = useState(false);
   const [asking, setAsking] = useState(false);
+  const [processingPdf, setProcessingPdf] = useState(false); // Track PDF processing status
   const [darkMode, setDarkMode] = useState(() => {
     // Load theme preference from localStorage
     const savedTheme = localStorage.getItem(THEME_STORAGE_KEY);
@@ -45,17 +46,23 @@ function App() {
   const uploadPDF = async () => {
     if (!file) return;
     setUploading(true);
+    setProcessingPdf(true);
     const formData = new FormData();
     formData.append("file", file);
     try {
+      // Upload and process PDF
       await axios.post(`${API_BASE}/upload`, formData);
       const url = URL.createObjectURL(file);
-      setPdfs(prev => [...prev, { name: file.name, url, chat: [] }]);
+      
+      // Clear chat history when new PDF is uploaded
+      setPdfs(prev => [...prev, { name: file.name, url, chat: [], processed: true }]);
       setSelectedPdf(file.name);
-      alert("PDF uploaded!");
+      setProcessingPdf(false);
+      alert("PDF uploaded and processed successfully!");
     } catch (e) {
       const message = e.response?.data?.error || "Upload failed.";
       alert(message);
+      setProcessingPdf(false);
     }
     setUploading(false);
   };
@@ -141,6 +148,8 @@ function App() {
 
   const currentChat = pdfs.find(pdf => pdf.name === selectedPdf)?.chat || [];
   const currentPdfUrl = pdfs.find(pdf => pdf.name === selectedPdf)?.url || null;
+  const isPdfProcessed = pdfs.find(pdf => pdf.name === selectedPdf)?.processed || false;
+  const canAskQuestions = selectedPdf && isPdfProcessed && !processingPdf;
 
   const toggleTheme = () => {
     setDarkMode(!darkMode);
@@ -200,9 +209,10 @@ function App() {
                       className={darkMode ? "bg-dark text-light border-secondary" : ""}
                     />
                   </Form.Group>
-                  <Button variant="primary" onClick={uploadPDF} disabled={!file || uploading}>
-                    {uploading ? <Spinner animation="border" size="sm" /> : "📤 Upload"}
+                  <Button variant="primary" onClick={uploadPDF} disabled={!file || uploading || processingPdf}>
+                    {uploading || processingPdf ? <Spinner animation="border" size="sm" /> : "📤 Upload"}
                   </Button>
+                  {processingPdf && <div className="mt-2 text-info small"><Spinner animation="border" size="sm" className="me-2" />Processing PDF...</div>}
                   {file && <span className="ms-3 text-muted">{file.name}</span>}
                 </Form>
                 {pdfs.length > 0 && (
@@ -218,7 +228,7 @@ function App() {
                           className={darkMode ? "text-light" : ""}
                           style={darkMode ? { backgroundColor: 'transparent' } : {}}
                         >
-                          {pdf.name}
+                          {pdf.name} {pdf.processed ? "✅" : "⏳"}
                         </Dropdown.Item>
                       ))}
                     </Dropdown.Menu>
@@ -290,7 +300,7 @@ function App() {
                 >
                   {currentChat.length === 0 ? (
                     <div className="text-center text-muted py-4">
-                      <p>No messages yet. Ask a question about your PDF!</p>
+                      <p>{canAskQuestions ? "No messages yet. Ask a question about your PDF!" : "Upload and process a PDF to start chatting."}</p>
                     </div>
                   ) : (
                     currentChat.map((msg, i) => (
@@ -316,17 +326,27 @@ function App() {
                     ))
                   )}
                 </div>
+                {!canAskQuestions && (
+                  <div className="alert alert-info mb-3 d-flex align-items-center">
+                    <span className="me-2">ℹ️</span>
+                    <span>
+                      {!selectedPdf ? "Please upload a PDF first to start asking questions." :
+                       processingPdf ? "Please wait while your PDF is being processed..." :
+                       !isPdfProcessed ? "Your PDF is still being processed. Please wait..." : ""}
+                    </span>
+                  </div>
+                )}
                 <Form className="d-flex gap-2 mb-3">
                   <Form.Control
                     type="text"
-                    placeholder="Ask a question..."
+                    placeholder={canAskQuestions ? "Ask a question..." : "Upload a PDF first..."}
                     value={question}
                     onChange={e => setQuestion(e.target.value)}
-                    disabled={asking}
-                    onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); askQuestion(); } }}
+                    disabled={asking || !canAskQuestions}
+                    onKeyDown={e => { if (e.key === "Enter" && canAskQuestions) { e.preventDefault(); askQuestion(); } }}
                     className={darkMode ? "bg-dark text-light border-secondary" : ""}
                   />
-                  <Button variant="success" onClick={askQuestion} disabled={asking || !question.trim() || !selectedPdf}>
+                  <Button variant="success" onClick={askQuestion} disabled={asking || !question.trim() || !canAskQuestions}>
                     {asking ? <Spinner animation="border" size="sm" /> : "💭 Ask"}
                   </Button>
                 </Form>
@@ -334,21 +354,21 @@ function App() {
                   <Button
                     variant={darkMode ? "outline-warning" : "warning"}
                     onClick={summarizePDF}
-                    disabled={summarizing || !selectedPdf}
+                    disabled={summarizing || !canAskQuestions}
                   >
                     {summarizing ? <Spinner animation="border" size="sm" /> : "📝 Summarize PDF"}
                   </Button>
                   <Button
                     variant={darkMode ? "outline-light" : "outline-secondary"}
                     onClick={() => exportChat("csv")}
-                    disabled={!selectedPdf}
+                    disabled={!selectedPdf || currentChat.length === 0}
                   >
                     📊 Export CSV
                   </Button>
                   <Button
                     variant={darkMode ? "outline-light" : "outline-secondary"}
                     onClick={() => exportChat("pdf")}
-                    disabled={!selectedPdf}
+                    disabled={!selectedPdf || currentChat.length === 0}
                   >
                     📄 Export PDF
                   </Button>

@@ -2,12 +2,13 @@ const express = require("express");
 const cors = require("cors");
 const multer = require("multer");
 const axios = require("axios");
-const fs = require("fs");
 const path = require("path");
 const rateLimit = require("express-rate-limit");
 const session = require("express-session");
 
 const app = express();
+app.set('trust proxy', 1);
+app.use(globalLimiter);
 app.use(cors());
 app.set('trust proxy', 1); // Fix ERR_ERL_UNEXPECTED_X_FORWARDED_FOR
 app.use(express.json());
@@ -54,29 +55,19 @@ const summarizeLimiter = rateLimit({
 // Storage for uploaded PDFs
 const upload = multer({ dest: "uploads/" });
 
-// Route: Upload PDF
 app.post("/upload", uploadLimiter, upload.single("file"), async (req, res) => {
   try {
-    if (!req.file) {
-      return res.status(400).json({ error: "No file uploaded. Use form field name 'file'." });
-    }
-
     const filePath = path.join(__dirname, req.file.path);
-
-    // Send PDF to Python service
-    await axios.post("http://localhost:5000/process-pdf", {
-      filePath: filePath,
+    const response = await axios.post("http://localhost:5000/process-pdf", {
+      filePath,
     });
 
-    res.json({ message: "PDF uploaded & processed successfully!" });
+    res.json({ doc_id: response.data.doc_id });
   } catch (err) {
-    const details = err.response?.data || err.message;
-    console.error("Upload processing failed:", details);
-    res.status(500).json({ error: "PDF processing failed", details });
+    res.status(500).json({ error: "Upload failed" });
   }
 });
 
-// Route: Ask Question
 app.post("/ask", askLimiter, async (req, res) => {
   try {
     const question = req.body.question;
@@ -124,13 +115,17 @@ app.post("/clear-history", (req, res) => {
 });
 
 app.post("/summarize", summarizeLimiter, async (req, res) => {
+  const response = await axios.post("http://localhost:5000/summarize", req.body);
+  res.json(response.data);
+});
+
+app.post("/compare", compareLimiter, async (req, res) => {
   try {
-    const response = await axios.post("http://localhost:5000/summarize", req.body || {});
-    res.json({ summary: response.data.summary });
+    const response = await axios.post("http://localhost:5000/compare", req.body);
+    res.json({ comparison: response.data.comparison });
   } catch (err) {
-    const details = err.response?.data || err.message;
-    console.error("Summarization failed:", details);
-    res.status(500).json({ error: "Error summarizing PDF", details });
+    console.error(err.response?.data || err.message);
+    res.status(500).json({ error: "Error comparing documents" });
   }
 });
 

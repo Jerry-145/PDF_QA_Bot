@@ -145,13 +145,16 @@ app.post("/upload", uploadLimiter, upload.single("file"), async (req, res) => {
 
     const filePath = path.join(__dirname, req.file.path);
 
+    // Send document to Python service with session isolation
     const response = await axios.post(
       "http://localhost:5000/process-pdf",
       { filePath, session_id: sessionId },
       { timeout: API_REQUEST_TIMEOUT }
     );
 
-    res.json({ message: "PDF uploaded & processed successfully" });
+    // Generate a unique doc_id (Python backend doesn't return one)
+    const doc_id = `doc_${Date.now()}_${Math.round(Math.random() * 1e6)}`;
+    res.json({ doc_id });
   } catch (err) {
     console.error("Upload failed:", err.response?.data || err.message);
 

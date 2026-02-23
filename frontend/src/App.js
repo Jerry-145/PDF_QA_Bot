@@ -67,10 +67,10 @@ function App() {
     document.body.classList.toggle("dark-mode", darkMode);
   }, [darkMode]);
 
-  // -------------------------------
-  // Upload PDF (with timeout)
-  // -------------------------------
-  const uploadPDF = async () => {
+  // ===============================
+  // Upload
+  // ===============================
+  const uploadDocument = async () => {
     if (!file) return;
 
     setUploading(true);
@@ -87,16 +87,22 @@ function App() {
       });
 
       const url = URL.createObjectURL(file);
+      const dotIndex = file.name.lastIndexOf(".");
+      const ext =
+        dotIndex !== -1 && dotIndex < file.name.length - 1
+          ? file.name.substring(dotIndex + 1).toLowerCase()
+          : "";
+
       setPdfs((prev) => [
         ...prev,
         { name: file.name, doc_id: res.data?.doc_id, url, ext },
       ]);
 
       setFile(null);
-      alert("PDF uploaded!");
+      alert("Document uploaded!");
     } catch (e) {
       if (e.name === "AbortError" || e.code === "ECONNABORTED") {
-        alert("Upload timed out. Try a smaller PDF.");
+        alert("Upload timed out. Try a smaller document.");
       } else {
         alert("Upload failed.");
       }

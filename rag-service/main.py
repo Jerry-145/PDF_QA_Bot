@@ -14,6 +14,7 @@ import os
 import re
 import uvicorn
 import time
+from pathlib import Path
 
 # -------------------------------------------------------------------
 # APP SETUP
@@ -34,13 +35,15 @@ app.state.limiter = limiter
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
-if not GROQ_API_KEY:
-    raise RuntimeError(
-        "GROQ_API_KEY is not set. Please add it to your .env file.\n"
-        "Get a free key at https://console.groq.com"
-    )
-
-groq_client = Groq(api_key=GROQ_API_KEY)
+# Initialize Groq client (will fail on API calls if key is invalid)
+groq_client = None
+if GROQ_API_KEY and GROQ_API_KEY != "your_groq_api_key_here":
+    try:
+        groq_client = Groq(api_key=GROQ_API_KEY)
+    except Exception as e:
+        print(f"Warning: Could not initialize Groq client: {e}")
+else:
+    print("Warning: GROQ_API_KEY not set or placeholder. Set a valid key in .env file.")
 
 # Session management
 sessions = {}
@@ -49,6 +52,32 @@ SESSION_TIMEOUT = 3600  # 1 hour
 embedding_model = HuggingFaceEmbeddings(
     model_name="sentence-transformers/all-MiniLM-L6-v2"
 )
+
+# -------------------------------------------------------------------
+# DOCUMENT PROCESSING SETUP
+# -------------------------------------------------------------------
+SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt"}
+splitter = RecursiveCharacterTextSplitter(
+    chunk_size=512,
+    chunk_overlap=100,
+    separators=["\n\n", "\n", " ", ""]
+)
+
+def load_document(file_path: str):
+    """Load document based on file extension."""
+    ext = Path(file_path).suffix.lower()
+    if ext == ".pdf":
+        loader = PyPDFLoader(file_path)
+        return loader.load()
+    elif ext == ".txt":
+        with open(file_path, "r", encoding="utf-8") as f:
+            return [Document(page_content=f.read(), metadata={"source": file_path})]
+    elif ext == ".docx":
+        from langchain_community.document_loaders import Docx2txtLoader
+        loader = Docx2txtLoader(file_path)
+        return loader.load()
+    else:
+        raise ValueError(f"Unsupported file format: {ext}")
 
 # -------------------------------------------------------------------
 # TEXT NORMALIZATION
@@ -61,7 +90,7 @@ def normalize_spaced_text(text: str) -> str:
     def fix_spaced_word(match):
         return match.group(0).replace(" ", "")
     pattern = r"\b(?:[A-Za-z] ){2,}[A-Za-z]\b"
-    return re.sub(pattern, fix, text)
+    return re.sub(pattern, fix_spaced_word, text)
 
 
 def normalize_answer(text: str) -> str:
@@ -121,16 +150,22 @@ def generate_response(system_prompt: str, user_prompt: str, max_tokens: int = 60
     """
     Calls the Groq chat-completions API with a system + user message pair.
     """
-    completion = groq_client.chat.completions.create(
-        model=GROQ_MODEL,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user",   "content": user_prompt},
-        ],
-        max_tokens=max_tokens,
-        temperature=0.3,
-    )
-    return completion.choices[0].message.content.strip()
+    if not groq_client:
+        return "Error: Groq API not configured. Please set GROQ_API_KEY in .env file."
+    
+    try:
+        completion = groq_client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user",   "content": user_prompt},
+            ],
+            max_tokens=max_tokens,
+            temperature=0.3,
+        )
+        return completion.choices[0].message.content.strip()
+    except Exception as e:
+        return f"Error generating response: {str(e)}"
 
 
 # -------------------------------------------------------------------
@@ -278,11 +313,14 @@ def ask_question(request: Request, data: AskRequest):
         content = msg.get("content", "")
         conversation_context += f"{role}: {content}\n"
 
-    docs = vectorstore.similarity_search(question, k=4)
+    docs = vectorstore.similarity_search_with_scores(question, k=4)
     if not docs:
         return {"answer": "No relevant context found in the uploaded document."}
 
-    context = "\n\n".join([doc.page_content for doc in docs])
+    doc_list = [doc for doc, _ in docs]
+    faiss_scores = [score for _, score in docs]
+    context = "\n\n".join([doc.page_content for doc in doc_list])
+    confidence = compute_confidence(faiss_scores)
 
     question_with_history = question
     if conversation_context.strip():

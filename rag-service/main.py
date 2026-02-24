@@ -28,6 +28,10 @@ import docx
 # APP SETUP
 # -------------------------------------------------------------------
 load_dotenv()
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+UPLOAD_DIR = (BASE_DIR / "uploads").resolve()
+
 app = FastAPI()
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
@@ -300,16 +304,25 @@ def cleanup_expired_sessions():
 @limiter.limit("15/15 minutes")
 def process_pdf(request: Request, data: DocumentPath):
     cleanup_expired_sessions()
-    
-    if not os.path.exists(data.filePath):
+
+    # Resolve and validate path (prevent path traversal)
+    file_path = Path(data.filePath).resolve()
+
+    if not str(file_path).startswith(str(UPLOAD_DIR)):
+        raise HTTPException(status_code=400, detail="Invalid file path")
+
+    if not file_path.exists():
         raise HTTPException(status_code=404, detail="Document not found")
 
-    ext = Path(data.filePath).suffix.lower()
+    ext = file_path.suffix.lower()
     if ext not in SUPPORTED_EXTENSIONS:
-        raise HTTPException(status_code=400, detail=f"Unsupported file format: {ext}. Supported: {', '.join(SUPPORTED_EXTENSIONS)}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file format: {ext}. Supported: {', '.join(SUPPORTED_EXTENSIONS)}"
+        )
 
     try:
-        raw_docs = load_document(data.filePath)
+        raw_docs = load_document(str(file_path))
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to load document: {str(e)}")
 
@@ -321,19 +334,25 @@ def process_pdf(request: Request, data: DocumentPath):
         for doc in raw_docs
     ]
 
-    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1000,
+        chunk_overlap=150
+    )
+
     chunks = splitter.split_documents(cleaned_docs)
 
     if not chunks:
-        raise HTTPException(status_code=400, detail="No text extracted from the document. Please check your file.")
+        raise HTTPException(
+            status_code=400,
+            detail="No text extracted from the document."
+        )
 
     sessions[data.session_id] = {
         "vectorstore": FAISS.from_documents(chunks, embedding_model),
         "last_accessed": time.time(),
     }
 
-    return {"message": "PDF processed successfully"}
-
+    return {"message": "Document processed successfully"}
 
 # ===============================
 # RELEVANCE CONFIGURATION
@@ -465,6 +484,7 @@ def summarize_pdf(request: Request, data: SummarizeRequest):
 
     session["last_accessed"] = time.time()
     vectorstore = session["vectorstore"]
+
 
     docs = vectorstore.similarity_search("Summarize the document.", k=6)
     if not docs:

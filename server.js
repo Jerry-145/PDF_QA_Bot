@@ -5,6 +5,11 @@ const axios = require("axios");
 const axiosRetry = require("axios-retry").default;
 const path = require("path");
 const rateLimit = require("express-rate-limit");
+const crypto = require("crypto");
+const { fileTypeFromFile } = require("file-type");
+const fs = require("fs");
+
+const app = express(); // Trust first proxy for rate limiting if behind a proxy
 const session = require("express-session");
 require("dotenv").config();
 
@@ -24,7 +29,6 @@ const MAX_RETRY_ATTEMPTS = parseInt(
 // ------------------------------------------------------------------
 // APP SETUP
 // ------------------------------------------------------------------
-const app = express();
 app.set("trust proxy", 1);
 app.use(cors());
 app.use(express.json());
@@ -97,6 +101,13 @@ const compareLimiter = rateLimit({
   legacyHeaders: false,
 });
 
+// Storage for uploaded PDFs
+const UPLOAD_DIR = path.resolve(__dirname, "uploads");
+
+if (!fs.existsSync(UPLOAD_DIR)) {
+  fs.mkdirSync(UPLOAD_DIR);
+}
+
 // ------------------------------------------------------------------
 // MULTER CONFIG (multi-format document storage)
 // ------------------------------------------------------------------
@@ -115,7 +126,7 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage,
-  limits: { fileSize: 10 * 1024 * 1024 },
+  limits: { fileSize: 20 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     const safeName = path.basename(file.originalname);
     const ext = path.extname(safeName).toLowerCase();
@@ -143,7 +154,53 @@ app.post("/upload", uploadLimiter, upload.single("file"), async (req, res) => {
       return res.status(400).json({ error: "Missing sessionId." });
     }
 
-    const filePath = path.join(__dirname, req.file.path);
+    const filePath = path.resolve(req.file.path);
+
+    //Magic byte check to ensure it's a PDF
+    const ext = path.extname(filePath).toLowerCase();
+    const detectedType = await fileTypeFromFile(filePath);
+
+    // Handle formats differently
+    if (ext === ".pdf") {
+      if (!detectedType || detectedType.mime !== "application/pdf") {
+        fs.unlinkSync(filePath);
+        return res.status(400).json({ error: "Invalid PDF file uploaded." });
+      }
+    }
+
+    else if (ext === ".docx") {
+      if (!detectedType || detectedType.mime !== "application/vnd.openxmlformats-officedocument.wordprocessingml.document") {
+        fs.unlinkSync(filePath);
+        return res.status(400).json({ error: "Invalid DOCX file uploaded." });
+      }
+    }
+
+    else if (ext === ".txt" || ext === ".md") {
+      // file-type may return undefined for plain text (this is normal)
+      const stats = fs.statSync(filePath);
+      if (stats.size === 0) {
+        fs.unlinkSync(filePath);
+        return res.status(400).json({ error: "Uploaded file is empty." });
+      }
+    }
+
+    else {
+      fs.unlinkSync(filePath);
+      return res.status(400).json({ error: "Unsupported file type." });
+    }
+
+    //Ensure file is not empty
+    const stats = fs.statSync(filePath);
+    if (stats.size === 0) {
+      fs.unlinkSync(filePath); // Delete the empty file
+      return res.status(400).json({ error: "Uploaded PDF is empty." });
+    }
+
+    //Ensure file stays in uploads directory and is not executable
+    if (!filePath.startsWith(UPLOAD_DIR)) {
+      fs.unlinkSync(filePath);
+      return res.status(400).json({ error: "Invalid file path." });
+    }
 
     await axios.post(
       "http://localhost:5000/process-pdf",
@@ -279,9 +336,14 @@ app.post("/compare", compareLimiter, async (req, res) => {
   }
 });
 
-// ------------------------------------------------------------------
-// START SERVER
-// ------------------------------------------------------------------
-app.listen(4000, () => {
-  console.log("Backend running on http://localhost:4000");
+// Global error handler for multer file size limit
+app.use((err, req, res, next) => {
+  if (err instanceof multer.MulterError) {
+    if (err.code === "LIMIT_FILE_SIZE") {
+      return res.status(400).json({ error: "File exceeds 20MB limit." });
+    }
+  }
+  next(err);
 });
+
+app.listen(4000, () => console.log("Backend running on http://localhost:4000"));

@@ -1,14 +1,16 @@
-from fastapi import FastAPI
-from fastapi import Request
-from pydantic import BaseModel
+from fastapi import FastAPI, HTTPException, Request
+from pydantic import BaseModel, Field, validator
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_core.documents import Document
-from dotenv import load_dotenv
+from langchain_core.prompts import PromptTemplate
 from groq import Groq
-import os
+from dotenv import load_dotenv
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+import os 
 import re
 import uvicorn
 from slowapi import Limiter
@@ -17,7 +19,13 @@ import uuid
 import threading
 from datetime import datetime
 
+# -------------------------------------------------------------------
+# APP SETUP
+# -------------------------------------------------------------------
 load_dotenv()
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+UPLOAD_DIR = (BASE_DIR / "uploads").resolve()
 
 app = FastAPI()
 limiter = Limiter(key_func=get_remote_address)
@@ -51,6 +59,9 @@ pdf_state_lock = threading.RLock() # Thread-safe access to PDF state
 # Load local embedding model (unchanged — FAISS retrieval stays the same)
 embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
 
+embedding_model = HuggingFaceEmbeddings(
+    model_name="sentence-transformers/all-MiniLM-L6-v2"
+)
 
 # ---------------------------------------------------------------------------
 # TEXT NORMALIZATION UTILITIES
@@ -88,79 +99,114 @@ def normalize_spaced_text(text: str) -> str:
     """
     Fixes character-level spaced text produced by PyPDFLoader on certain
     vector-based PDFs (e.g. NPTEL / IBM Coursera certificates).
-
-    Examples:
-        'J A I N I   S O L A N K I'  ->  'JAINI SOLANKI'
-        'I B M'                       ->  'IBM'
-        'N P T E L'                   ->  'NPTEL'
-
-    Normal multi-letter words are left completely untouched.
     """
     def fix_spaced_word(match):
         return match.group(0).replace(" ", "")
-
-    # Pattern: 3+ single alpha chars each separated by exactly one space
-    pattern = r'\b(?:[A-Za-z] ){2,}[A-Za-z]\b'
-    return re.sub(pattern, fix_spaced_word, text)
+    pattern = r"\b(?:[A-Za-z] ){2,}[A-Za-z]\b"
+    return re.sub(pattern, fix, text)
 
 
 def normalize_answer(text: str) -> str:
     """
-    Post-processes the LLM-generated answer:
-    - Removes any residual character-level spacing.
-    - Strips prompt leakage (lines starting with 'Answer', 'Context', etc.)
-    - Collapses excessive whitespace.
+    Post-processes the LLM-generated answer.
     """
-    # Remove residual character spacing in the answer itself
     text = normalize_spaced_text(text)
-    # Strip any prompt-leakage prefixes the model might echo
-    text = re.sub(r'^(Answer[^:]*:|Context:|Question:)\s*', '', text, flags=re.IGNORECASE)
-    # Collapse multiple spaces/newlines
+    # Strip only clear prompt-echo artefacts at the very start
+    text = re.sub(r'^(Final Answer:|Context:|Question:)\s*', '', text, flags=re.IGNORECASE)
     text = re.sub(r'[ \t]{2,}', ' ', text)
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
 
 
 # ---------------------------------------------------------------------------
-# GROQ-BASED RESPONSE GENERATION
+# CCC PROMPT TEMPLATE (Connect – Content – Continue)
 # ---------------------------------------------------------------------------
 
-def generate_response(prompt: str, max_new_tokens: int = 512) -> str:
+_CCC_SYSTEM = (
+    "You are an intelligent PDF Question Answering Assistant.\n"
+    "Your task is to answer the user's question strictly using the provided context "
+    "retrieved from uploaded documents.\n\n"
+    "Follow the CCC communication structure in a SINGLE response:\n\n"
+    "1. Context Connection — Start with a short professional greeting (e.g. \"Hello,\").\n"
+    "2. Content Explanation — Rewrite the retrieved context in clear, meaningful, "
+    "grammatically correct sentences. Do NOT copy text directly.\n"
+    "3. Core Answer — Present the main explanation in a structured, readable format.\n"
+    "4. Call to Action — End with a relevant follow-up question to encourage further exploration.\n\n"
+    "Rules:\n"
+    "- Use ONLY the provided context. Do NOT add external knowledge.\n"
+    "- If the answer is not in the context, say: "
+    "\"The uploaded document does not contain sufficient information to answer this question.\"\n"
+    "- Maintain a clear, professional tone.\n"
+    "- Produce one continuous response — no bullet headers like '1.' or '2.'."
+)
+
+_CCC_USER_TEMPLATE = """\
+Context from the uploaded PDF:
+{context}
+
+Question:
+{question}
+
+Final Answer:"""
+
+CCC_PROMPT = PromptTemplate(
+    input_variables=["context", "question"],
+    template=_CCC_USER_TEMPLATE,
+)
+
+
+# ---------------------------------------------------------------------------
+# GROQ GENERATION
+# ---------------------------------------------------------------------------
+
+def generate_response(system_prompt: str, user_prompt: str, max_tokens: int = 600) -> str:
     """
-    Sends the prompt to the Groq API using the configured llama-3.3-70b-versatile
-    model and returns the generated text.
+    Calls the Groq chat-completions API with a system + user message pair.
     """
-    chat_completion = groq_client.chat.completions.create(
-        messages=[
-            {
-                "role": "user",
-                "content": prompt,
-            }
-        ],
+    completion = groq_client.chat.completions.create(
         model=GROQ_MODEL,
-        max_tokens=max_new_tokens,
-        temperature=0.2,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user",   "content": user_prompt},
+        ],
+        max_tokens=max_tokens,
+        temperature=0.3,
     )
-    return chat_completion.choices[0].message.content.strip()
+    return completion.choices[0].message.content.strip()
 
 
-# ---------------------------------------------------------------------------
+# -------------------------------------------------------------------
 # REQUEST MODELS
-# ---------------------------------------------------------------------------
+# -------------------------------------------------------------------
 
-class PDFPath(BaseModel):
+class DocumentPath(BaseModel):
     filePath: str
+    session_id: str
+
 
 class AskRequest(BaseModel):
-    question: str
+    question: str = Field(..., min_length=1, max_length=2000)
+    session_id: str
     history: list = []
 
-
 class SummarizeRequest(BaseModel):
+    session_id: str
     pdf: str | None = None
 
 
-# ---------------------------------------------------------------------------
+# -------------------------------------------------------------------
+# SESSION CLEANUP
+# -------------------------------------------------------------------
+def cleanup_expired_sessions():
+    now = time.time()
+    expired = [
+        sid for sid, s in sessions.items()
+        if now - s["last_accessed"] > SESSION_TIMEOUT
+    ]
+    for sid in expired:
+        del sessions[sid]
+
+# -------------------------------------------------------------------
 # ENDPOINTS
 # ---------------------------------------------------------------------------
 
@@ -363,5 +409,8 @@ def get_pdf_status(request: Request):
         }
 
 
+# -------------------------------------------------------------------
+# START SERVER
+# -------------------------------------------------------------------
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=5000, reload=True)

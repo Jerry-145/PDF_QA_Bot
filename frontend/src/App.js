@@ -191,27 +191,19 @@ function App() {
     }
   };
 
-  // -------------------------------
-  // Compare PDFs
-  // -------------------------------
-  const compareDocuments = async () => {
-    if (selectedDocs.length < 2) return;
-
-    setComparing(true);
-    try {
-      const res = await axios.post(`${API_BASE}/compare`, {
-        sessionId,
-        doc_ids: selectedDocs,
-      });
-      setComparisonResult(res.data.comparison);
-      setChatHistory((prev) => [
-        ...prev,
-        { role: "bot", text: res.data.comparison },
-      ]);
-    } catch {
-      alert("Error comparing documents.");
-    } finally {
-      setComparing(false);
+  // Export chat
+  const exportChat = (type) => {
+    if (!selectedPdf) return;
+    const chat = pdfs.find(pdf => pdf.name === selectedPdf)?.chat || [];
+    if (type === "csv") {
+      const csv = Papa.unparse(chat);
+      const blob = new Blob([csv], { type: "text/csv" });
+      saveAs(blob, `${selectedPdf}-chat.csv`);
+    } else if (type === "pdf") {
+      // Export chat as plain text (real PDF would require jsPDF/pdf-lib)
+      const text = chat.map(msg => `${msg.role}: ${msg.text}`).join("\n\n");
+      const blob = new Blob([text], { type: "text/plain" });
+      saveAs(blob, `${selectedPdf}-chat.txt`);
     }
   };
 
@@ -309,6 +301,18 @@ function App() {
             </Card>
           </>
         )}
+
+        {/* Chat */}
+        <Card className={cardClass}>
+          <Card.Body>
+            <div style={{ maxHeight: 300, overflowY: "auto", marginBottom: 16 }}>
+              {chatHistory.map((msg, i) => (
+                <div key={i} className="mb-2">
+                  <strong>{msg.role === "user" ? "You" : "Bot"}:</strong>
+                  <ReactMarkdown>{msg.text}</ReactMarkdown>
+                </div>
+              ))}
+            </div>
 
         {/* Chat Mode */}
         {selectedPdfs.length !== 2 && (

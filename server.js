@@ -5,6 +5,11 @@ const axios = require("axios");
 const axiosRetry = require("axios-retry").default;
 const path = require("path");
 const rateLimit = require("express-rate-limit");
+const crypto = require("crypto");
+const { fileTypeFromFile } = require("file-type");
+const fs = require("fs");
+
+const app = express(); // Trust first proxy for rate limiting if behind a proxy
 const session = require("express-session");
 require("dotenv").config();
 
@@ -24,7 +29,6 @@ const MAX_RETRY_ATTEMPTS = parseInt(
 // ------------------------------------------------------------------
 // APP SETUP
 // ------------------------------------------------------------------
-const app = express();
 app.set("trust proxy", 1);
 app.use(cors());
 app.use(express.json());
@@ -111,6 +115,13 @@ const compareLimiter = rateLimit({
   legacyHeaders: false,
 });
 
+// Storage for uploaded PDFs
+const UPLOAD_DIR = path.resolve(__dirname, "uploads");
+
+if (!fs.existsSync(UPLOAD_DIR)) {
+  fs.mkdirSync(UPLOAD_DIR);
+}
+
 // ------------------------------------------------------------------
 // MULTER CONFIG (multi-format document storage)
 // ------------------------------------------------------------------
@@ -132,7 +143,7 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage,
-  limits: { fileSize: 10 * 1024 * 1024 },
+  limits: { fileSize: 20 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     const safeName = path.basename(file.originalname);
     const ext = path.extname(safeName).toLowerCase();
@@ -161,7 +172,53 @@ app.post("/upload", uploadLimiter, upload.single("file"), async (req, res) => {
       return res.status(400).json({ error: "Missing sessionId." });
     }
 
-    const filePath = path.join(__dirname, req.file.path);
+    const filePath = path.resolve(req.file.path);
+
+    //Magic byte check to ensure it's a PDF
+    const ext = path.extname(filePath).toLowerCase();
+    const detectedType = await fileTypeFromFile(filePath);
+
+    // Handle formats differently
+    if (ext === ".pdf") {
+      if (!detectedType || detectedType.mime !== "application/pdf") {
+        fs.unlinkSync(filePath);
+        return res.status(400).json({ error: "Invalid PDF file uploaded." });
+      }
+    }
+
+    else if (ext === ".docx") {
+      if (!detectedType || detectedType.mime !== "application/vnd.openxmlformats-officedocument.wordprocessingml.document") {
+        fs.unlinkSync(filePath);
+        return res.status(400).json({ error: "Invalid DOCX file uploaded." });
+      }
+    }
+
+    else if (ext === ".txt" || ext === ".md") {
+      // file-type may return undefined for plain text (this is normal)
+      const stats = fs.statSync(filePath);
+      if (stats.size === 0) {
+        fs.unlinkSync(filePath);
+        return res.status(400).json({ error: "Uploaded file is empty." });
+      }
+    }
+
+    else {
+      fs.unlinkSync(filePath);
+      return res.status(400).json({ error: "Unsupported file type." });
+    }
+
+    //Ensure file is not empty
+    const stats = fs.statSync(filePath);
+    if (stats.size === 0) {
+      fs.unlinkSync(filePath); // Delete the empty file
+      return res.status(400).json({ error: "Uploaded PDF is empty." });
+    }
+
+    //Ensure file stays in uploads directory and is not executable
+    if (!filePath.startsWith(UPLOAD_DIR)) {
+      fs.unlinkSync(filePath);
+      return res.status(400).json({ error: "Invalid file path." });
+    }
 
     await axios.post(
       "http://localhost:5000/process-pdf",
@@ -169,18 +226,13 @@ app.post("/upload", uploadLimiter, upload.single("file"), async (req, res) => {
       { timeout: API_REQUEST_TIMEOUT }
     );
 
-    // Generate a unique doc_id (Python backend doesn't return one)
-    const doc_id = `doc_${Date.now()}_${Math.round(Math.random() * 1e6)}`;
-    res.json({ doc_id });
+    // Use filename as a fallback doc_id if one isn't returned
+    res.json({
+      message: response.data.message,
+      doc_id: response.data.doc_id || req.file.filename
+    });
   } catch (err) {
-    console.error("Upload failed:", err.response?.data || err.message);
-
-    if (err.code === "ECONNABORTED") {
-      return res.status(504).json({
-        error: "PDF processing timed out",
-      });
-    }
-
+    console.error("Upload failed:", err.message);
     res.status(500).json({ error: "Upload failed" });
   }
 });
@@ -229,15 +281,10 @@ app.post("/ask", askLimiter, async (req, res) => {
       content: response.data.answer,
     });
 
-    res.json({ answer: response.data.answer });
-  } catch (err) {
-    console.error("Ask failed:", err.response?.data || err.message);
-
-    if (err.code === "ECONNABORTED") {
-      return res.status(504).json({ error: "Question timed out" });
-    }
-
-    res.status(500).json({ error: "Error answering question" });
+    res.json(response.data);
+  } catch (error) {
+    console.error("Ask failed:", error.message);
+    res.status(500).json({ error: "Error asking question" });
   }
 });
 
@@ -271,11 +318,6 @@ app.post("/summarize", summarizeLimiter, async (req, res) => {
     res.json({ summary: response.data.summary });
   } catch (err) {
     console.error("Summarize failed:", err.response?.data || err.message);
-
-    if (err.code === "ECONNABORTED") {
-      return res.status(504).json({ error: "Summarization timed out" });
-    }
-
     res.status(500).json({ error: "Error summarizing PDF" });
   }
 });
@@ -284,6 +326,11 @@ app.post("/summarize", summarizeLimiter, async (req, res) => {
 // ROUTE: COMPARE
 // ------------------------------------------------------------------
 app.post("/compare", compareLimiter, async (req, res) => {
+  const { sessionId } = req.body;
+  if (!sessionId) {
+    return res.status(400).json({ error: "Missing sessionId." });
+  }
+
   try {
     const response = await axios.post(
       "http://localhost:5000/compare",

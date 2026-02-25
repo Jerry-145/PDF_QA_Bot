@@ -139,7 +139,7 @@ function App() {
       const url = URL.createObjectURL(file);
       setPdfs((prev) => [
         ...prev,
-        { name: file.name, doc_id: res.data.doc_id, url },
+        { name: file.name, doc_id: res.data.doc_id,session_id: res.data.session_id, url },
       ]);
       setFile(null);
       alert("PDF uploaded!");

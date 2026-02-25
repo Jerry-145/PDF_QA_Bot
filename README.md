@@ -119,6 +119,10 @@ Interactive docs: `http://localhost:5000/docs`
 - RAG index is in-memory (rebuilds after restart)
 - Summarization and QA use retrieved context from the last processed PDF
 
+## Advanced Issues
+
+See [ADVANCED_ISSUES.md](ADVANCED_ISSUES.md) for critical security, performance, and architecture issues that need attention before production deployment.
+
 ## Contributing
 
 Refer to [CONTRIBUTING.md](CONTRIBUTING.md) for detailed instructions on creating a branch, naming conventions, committing changes, and submitting pull requests.

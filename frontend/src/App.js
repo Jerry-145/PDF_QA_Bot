@@ -1,34 +1,28 @@
-
 import React, { useState, useEffect } from "react";
 import axios from "axios";
 import ReactMarkdown from "react-markdown";
-import { Document, Page, pdfjs } from "react-pdf";
-import 'bootstrap/dist/css/bootstrap.min.css';
+import "bootstrap/dist/css/bootstrap.min.css";
 import {
   Container,
-  Row,
-  Col,
   Button,
   Form,
   Card,
   Spinner,
   Navbar,
   Dropdown
+
 } from "react-bootstrap";
 
-pdfjs.GlobalWorkerOptions.workerSrc = new URL(
-  "pdfjs-dist/build/pdf.worker.min.mjs",
-  import.meta.url
-).toString();
-
 const API_BASE = process.env.REACT_APP_API_URL || "";
-const THEME_STORAGE_KEY = 'pdfQABot_theme';
+const THEME_STORAGE_KEY = "pdf-qa-bot-theme";
 
 function App() {
+  // Core state
   const [file, setFile] = useState(null);
   // Multi-document support (from remote)
   const [pdfs, setPdfs] = useState([]); // {name, doc_id, url, chat: [], processed: false}
   const [selectedDocs, setSelectedDocs] = useState([]);
+  const [question, setQuestion] = useState("");
   const [chatHistory, setChatHistory] = useState([]);
   const [comparisonResult, setComparisonResult] = useState(null);
   
@@ -72,7 +66,28 @@ function App() {
 
     try {
       // Upload and process PDF
+
+  // Theme
+  const [darkMode, setDarkMode] = useState(() => {
+    const saved = localStorage.getItem(THEME_STORAGE_KEY);
+    return saved ? JSON.parse(saved) : false;
+  });
+
+  useEffect(() => {
+    localStorage.setItem(THEME_STORAGE_KEY, JSON.stringify(darkMode));
+  }, [darkMode]);
+
+  // Upload
+  const uploadDocument = async () => {
+    if (!file) return;
+
+    setUploading(true);
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+
       const res = await axios.post(`${API_BASE}/upload`, formData);
+
       const url = URL.createObjectURL(file);
       
       // Add PDF with both doc_id (remote) and chat history (local)
@@ -94,19 +109,14 @@ function App() {
       alert(message);
       setProcessingPdf(false);
     }
-
-    setUploading(false);
   };
 
-  // ===============================
-  // Toggle selection (multi-doc)
-  // ===============================
   const toggleDocSelection = (doc_id) => {
     setComparisonResult(null);
-    setSelectedDocs(prev =>
-      prev.includes(doc_id)
-        ? prev.filter(id => id !== doc_id)
-        : [...prev, doc_id]
+    setSelectedDocs((prev) =>
+      prev.includes(sessionId)
+        ? prev.filter((id) => id !== sessionId)
+        : [...prev, sessionId]
     );
   };
 
@@ -116,28 +126,32 @@ function App() {
   const askQuestion = async () => {
     if (!question.trim() || selectedDocs.length === 0) return;
 
-    setChatHistory(prev => [...prev, { role: "user", text: question }]);
     setAsking(true);
+    setChatHistory((prev) => [...prev, { role: "user", text: question }]);
 
     try {
+      // Use the first selected document's sessionId
       const res = await axios.post(`${API_BASE}/ask`, {
         question,
-        doc_ids: selectedDocs
+        sessionId: selectedDocs[0], // Send the stored sessionId
       });
 
-      setChatHistory(prev => [
+      setChatHistory((prev) => [
         ...prev,
-        { role: "bot", text: res.data.answer }
+        {
+          role: "bot",
+          text: res.data.answer,
+        },
       ]);
     } catch {
-      setChatHistory(prev => [
+      setChatHistory((prev) => [
         ...prev,
-        { role: "bot", text: "Error getting answer." }
+        { role: "bot", text: "Error getting answer." },
       ]);
+    } finally {
+      setQuestion("");
+      setAsking(false);
     }
-
-    setQuestion("");
-    setAsking(false);
   };
 
   // ===============================
@@ -185,12 +199,10 @@ function App() {
 
   // ===============================
   // Summarize
-  // ===============================
   const summarizePDF = async () => {
     if (selectedDocs.length === 0 && !selectedPdf) return;
 
     setSummarizing(true);
-
     try {
       let doc_ids;
       if (selectedDocs.length > 0) {
@@ -220,42 +232,33 @@ function App() {
       }
     } catch {
       alert("Error summarizing.");
+    } finally {
+      setSummarizing(false);
     }
-
-    setSummarizing(false);
   };
 
-  // ===============================
-  // Compare (Side-by-side OR Chat mode)
-  // ===============================
+  // Compare
   const compareDocuments = async () => {
     if (selectedDocs.length < 2) return;
 
     setComparing(true);
-
     try {
       const res = await axios.post(`${API_BASE}/compare`, {
-        doc_ids: selectedDocs
+        sessionId,
+        doc_ids: selectedDocs,
       });
 
-      // If exactly 2 → show structured side view
-      if (selectedDocs.length === 2) {
-        setComparisonResult(res.data.comparison);
-      } 
-      // If more than 2 → push to chat mode
-      else {
-        setChatHistory(prev => [
-          ...prev,
-          { role: "user", text: "Compare selected documents." },
-          { role: "bot", text: res.data.comparison }
-        ]);
-      }
+      setComparisonResult(res.data.comparison);
 
+      setChatHistory((prev) => [
+        ...prev,
+        { role: "bot", text: res.data.comparison },
+      ]);
     } catch {
-      alert("Error comparing documents.");
+      alert("Error comparing.");
+    } finally {
+      setComparing(false);
     }
-
-    setComparing(false);
   };
 
   // ===============================
@@ -292,18 +295,18 @@ function App() {
   const isPdfProcessed = pdfs.find(pdf => pdf.name === selectedPdf)?.processed || false;
   const canAskQuestions = selectedPdf && isPdfProcessed && !processingPdf;
 
-<<<<<<< HEAD
   const currentChat = pdfs.find(pdf => pdf.name === selectedPdf)?.chat || [];
   const currentPdfUrl = pdfs.find(pdf => pdf.name === selectedPdf)?.url || null;
   const isPdfProcessed = pdfs.find(pdf => pdf.name === selectedPdf)?.processed || false;
   const canAskQuestions = selectedPdf && isPdfProcessed && !processingPdf;
+  const selectedPdfs = pdfs.filter((p) =>
+    selectedDocs.includes(p.sessionId)
+  );
 
-=======
->>>>>>> 55e99503786400a090af97fb554fc214052a6487
   return (
-    <div className={themeClass} style={{ minHeight: "100vh" }}>
-      <Navbar bg={darkMode ? "dark" : "primary"} variant="dark">
-        <Container>
+    <div className={darkMode ? "bg-dark text-light" : "bg-light"}>
+      <Navbar bg="primary" variant="dark">
+        <Container className="d-flex justify-content-between">
           <Navbar.Brand>PDF Q&A Bot</Navbar.Brand>
           <Button variant="outline-light" onClick={() => setDarkMode(!darkMode)}>
             {darkMode ? "☀️ Light" : "🌙 Dark"} Mode
@@ -312,8 +315,6 @@ function App() {
       </Navbar>
 
       <Container className="mt-4">
-
-        {/* Upload */}
         <Card className="mb-4">
           <Card.Body>
             <h5>📤 Upload PDF</h5>
@@ -592,6 +593,31 @@ function App() {
           </Card>
         )}
 
+        <div style={{ maxHeight: 300, overflowY: "auto" }}>
+          {chatHistory.map((msg, i) => (
+            <div key={i}>
+              <b>{msg.role}:</b>
+              <ReactMarkdown>{msg.text}</ReactMarkdown>
+            </div>
+          ))}
+        </div>
+
+        <Form
+          onSubmit={(e) => {
+            e.preventDefault();
+            askQuestion();
+          }}
+        >
+          <Form.Control
+            value={question}
+            onChange={(e) => setQuestion(e.target.value)}
+            placeholder="Ask..."
+          />
+        </Form>
+
+        <Button onClick={summarizePDF} disabled={summarizing}>
+          {summarizing ? "Summarizing..." : "Summarize"}
+        </Button>
       </Container>
     </div>
   );

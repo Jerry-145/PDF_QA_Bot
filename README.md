@@ -1,13 +1,27 @@
 # PDF Q&A Bot
 
-RAG-based PDF question-answering app with:
+RAG-based document question-answering app with:
 
 - **Frontend**: React app (`frontend/`)
 - **Backend API**: Node + Express (`server.js`)
 - **RAG Service**: FastAPI + Hugging Face + FAISS (`rag-service/`)
 - **🔐 Authentication**: Role-based access control with JWT tokens
 
-Upload a PDF, ask questions from its content, and generate a short summary.
+Upload a PDF, ask questions from its content, and generate a short summary. You can export the chat as **CSV** or **TXT** (plain text).
+
+---
+
+## 🚀 Important: Context Leakage Fix Implemented
+
+**Issue Resolved**: The system previously showed content from old PDFs when answering questions about new PDFs. This has been **completely fixed**.
+
+**For testing and understanding the fix**, see:
+- 📖 [START_HERE.md](START_HERE.md) - Quick start (5 minutes)
+- 🧪 [QUICK_TEST_GUIDE.md](QUICK_TEST_GUIDE.md) - Testing procedures
+- 📋 [CONTEXT_LEAKAGE_FIX.md](CONTEXT_LEAKAGE_FIX.md) - Technical details
+- 📝 [SOLUTION_SUMMARY.md](SOLUTION_SUMMARY.md) - Complete overview
+
+---
 
 ⚠️ **SECURITY NOTE**: As of v2.0.0, authentication is required for all PDF processing endpoints. See [Authentication](#authentication) section below.
 
@@ -15,7 +29,7 @@ Upload a PDF, ask questions from its content, and generate a short summary.
 
 1. Frontend uploads file to Node backend (`/upload`)
 2. Node forwards file path to FastAPI (`/process-pdf`)
-3. FastAPI loads/splits PDF, builds vector index with embeddings
+3. FastAPI detects file format (`.pdf`, `.docx`, `.txt`, `.md`), loads and splits the document, builds vector index with embeddings
 4. For `/ask` and `/summarize`, FastAPI retrieves relevant chunks and generates output with a Hugging Face model
 5. **🔐 All API endpoints now require valid JWT authentication**
 
@@ -263,14 +277,16 @@ uvicorn main:app --host 0.0.0.0 --port 5000 --reload
 ### Terminal B — Node backend (port 4000)
 
 ```bash
-cd /workspaces/pdf-qa-bot
+# from the repository root (where server.js lives)
+cd <your-repo-directory>
 node server.js
 ```
 
 ### Terminal C — Frontend (port 3000)
 
 ```bash
-cd /workspaces/pdf-qa-bot/frontend
+# navigate into the frontend subfolder from the repo root
+cd frontend
 npm start
 ```
 
@@ -360,6 +376,9 @@ The Docker Compose setup ensures:
 - `POST /compare` - Compare multiple documents
 - `GET /documents` - List processed documents
 - `GET /similarity-matrix` - Get document similarity matrix
+- `POST /upload` (multipart form-data, field: `file`) — accepts `.pdf`, `.docx`, `.txt`, `.md`
+- `POST /ask` (`{ "question": "..." }`)
+- `POST /summarize` (`{}`)
 
 #### Authentication Endpoints (Public)
 
@@ -529,6 +548,10 @@ The authentication system is designed for future extension:
 - **Multi-tenant**: Database schema ready for organization support
 - **Audit Logging**: Framework in place for comprehensive audit trails
 
+## Advanced Issues
+
+See [ADVANCED_ISSUES.md](ADVANCED_ISSUES.md) for critical security, performance, and architecture issues that need attention before production deployment.
+
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+Refer to [CONTRIBUTING.md](CONTRIBUTING.md) for detailed instructions on creating a branch, naming conventions, committing changes, and submitting pull requests.

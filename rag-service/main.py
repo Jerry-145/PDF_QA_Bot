@@ -84,6 +84,7 @@ class AskRequest(BaseModel):
 
 class SummarizeRequest(BaseModel):
     session_ids: list = []
+    length: str = Field(default="medium")
 
 
 class CompareRequest(BaseModel):
@@ -221,7 +222,7 @@ def ask_question(request: Request, data: AskRequest):
 
 
 # ===============================
-# SUMMARIZE
+# SUMMARIZE (Improved Version)
 # ===============================
 @app.post("/summarize")
 @limiter.limit("15/15 minutes")
@@ -240,14 +241,70 @@ def summarize_pdf(request: Request, data: SummarizeRequest):
     if not vectorstores:
         return {"summary": "No documents found."}
 
+    # ---------------------------------------------------------
+    # 1️⃣ Increase Retrieval Depth (k=12 instead of 6)
+    # ---------------------------------------------------------
     docs = []
     for vs in vectorstores:
-        docs.extend(vs.similarity_search("Summarize the document", k=6))
+        docs.extend(
+            vs.similarity_search(
+                "Provide a complete structured summary of the document.",
+                k=12
+            )
+        )
 
-    context = "\n\n".join([d.page_content for d in docs])
+    if not docs:
+        return {"summary": "No document context available."}
 
-    prompt = f"Summarize this document:\n\n{context}\n\nSummary:"
-    summary = generate_response(prompt, 250)
+    # ---------------------------------------------------------
+    # 2️⃣ Extractive Stage (Key Points First)
+    # ---------------------------------------------------------
+    context_chunks = [d.page_content for d in docs]
+
+    extractive_prompt = (
+        "Extract the 10 most important factual points from the document below.\n"
+        "List them as short bullet points.\n"
+        "Do NOT summarize yet.\n\n"
+        + "\n\n".join(context_chunks)
+    )
+
+    key_points = generate_response(extractive_prompt, 300)
+
+    # ---------------------------------------------------------
+    # 3️⃣ Length Control
+    # ---------------------------------------------------------
+    if data.length == "short":
+        instruction = "Provide 3-5 concise bullet points."
+        max_tokens = 200
+    elif data.length == "long":
+        instruction = "Provide a detailed structured summary with 10-15 bullet points."
+        max_tokens = 500
+    else:
+        instruction = "Provide 5-8 well-structured bullet points."
+        max_tokens = 350
+
+    # ---------------------------------------------------------
+    # 4️⃣ Abstractive Stage (Final Structured Summary)
+    # ---------------------------------------------------------
+    final_prompt = (
+        "You are an expert document summarizer.\n"
+        "Using the extracted key points below, generate a structured summary.\n"
+        "Organize your response into:\n"
+        "- Executive Summary\n"
+        "- Key Findings\n"
+        "- Conclusion\n\n"
+        f"{instruction}\n\n"
+        f"Extracted Key Points:\n{key_points}\n\n"
+        "Final Summary:"
+    )
+
+    summary = generate_response(final_prompt, max_tokens)
+
+    # ---------------------------------------------------------
+    # 5️⃣ Basic Validation
+    # ---------------------------------------------------------
+    if len(summary.split()) < 40:
+        summary += "\n\n(Note: The document may contain limited summarizable content.)"
 
     return {"summary": summary}
 

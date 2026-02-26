@@ -156,6 +156,13 @@ class AskRequest(BaseModel):
 class SummarizeRequest(BaseModel):
     session_id: str
     doc_ids: list = []
+    length: str = "medium"
+
+    @validator("length")
+    def validate_length(cls, v):
+        if v not in ["short", "medium", "long"]:
+            raise ValueError("length must be short, medium, or long")
+        return v
 
 class CompareRequest(BaseModel):
     session_id: str
@@ -314,24 +321,70 @@ def summarize_pdf(request: Request, data: SummarizeRequest):
     if not vectorstores:
         return {"summary": "No documents found for the selected session."}
 
-    docs = merged_similarity_search(vectorstores, "Give a concise summary of the document.", k=6)
+    # ---------------------------------------------------------
+    # 1️⃣ Increase Retrieval Depth
+    # ---------------------------------------------------------
+    docs = merged_similarity_search(
+        vectorstores,
+        "Provide a complete structured summary of the document.",
+        k=12   # Increased from 6
+    )
+
     if not docs:
         return {"summary": "No document context available to summarize."}
 
-    context = "\n\n".join([doc.page_content for doc in docs])
+    # ---------------------------------------------------------
+    # 2️⃣ Extractive Stage (Key Points First)
+    # ---------------------------------------------------------
+    all_text_chunks = [doc.page_content for doc in docs]
 
-    prompt = (
-        "Summarize the following document excerpt in 5-7 clear bullet points.\n"
-        "Each bullet point must state one key fact (who, what, when, where, or why).\n"
-        "Use ONLY the information provided below. Do NOT add assumptions.\n"
-        "Do NOT repeat these instructions in your response.\n\n"
-        f"Document excerpt:\n{context}\n\n"
-        "Summary:"
+    extractive_prompt = (
+        "Extract the 10 most important factual points from the document below.\n"
+        "List them as short bullet points.\n"
+        "Do NOT summarize yet.\n\n"
+        + "\n\n".join(all_text_chunks)
     )
 
-    raw_summary = generate_response(prompt, max_new_tokens=300)
-    # Post-process: strip any leaked prompt sections from the generated summary.
+    raw_key_points = generate_response(extractive_prompt, max_new_tokens=300)
+    key_points = extract_final_answer(raw_key_points)
+
+    # ---------------------------------------------------------
+    # 3️⃣ Length Control
+    # ---------------------------------------------------------
+    if data.length == "short":
+        instruction = "Provide 3-5 concise bullet points."
+        max_tokens = 200
+    elif data.length == "long":
+        instruction = "Provide a detailed structured summary with headings and 10-15 bullet points."
+        max_tokens = 500
+    else:
+        instruction = "Provide 5-8 well-structured bullet points."
+        max_tokens = 350
+
+    # ---------------------------------------------------------
+    # 4️⃣ Abstractive Stage (Final Summary)
+    # ---------------------------------------------------------
+    abstractive_prompt = (
+        "You are an expert document summarizer.\n"
+        "Using the key extracted points below, generate a structured summary.\n"
+        "Organize by:\n"
+        "- Executive Summary\n"
+        "- Key Findings\n"
+        "- Conclusion\n\n"
+        f"{instruction}\n\n"
+        f"Extracted Key Points:\n{key_points}\n\n"
+        "Final Summary:"
+    )
+
+    raw_summary = generate_response(abstractive_prompt, max_new_tokens=max_tokens)
     summary = extract_final_answer(raw_summary)
+
+    # ---------------------------------------------------------
+    # 5️⃣ Basic Validation
+    # ---------------------------------------------------------
+    if len(summary.split()) < 40:
+        summary += "\n\n(Note: The document may contain limited summarizable content.)"
+
     return {"summary": summary}
 
 
